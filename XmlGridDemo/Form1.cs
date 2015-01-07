@@ -16,7 +16,8 @@ namespace XmlGridDemo
     public partial class Form1 : Form
     {
 
-        public XmlGridView xmlGrid;        
+        public XmlGridView xmlGrid;
+        private string _fileName;
 
         public Form1()
         {            
@@ -31,8 +32,21 @@ namespace XmlGridDemo
             xmlGrid.Size = new Size(100, 100);
             xmlGrid.TabIndex = 0;
             xmlGrid.AutoHeightCells = true;
-            panel1.Controls.Add(xmlGrid);                        
-        } 
+            xmlGrid.UseSingleColumnTrees = true;
+            xmlGridPanel.Controls.Add(xmlGrid); 
+            xmlGrid.FocusedCellChanged += XmlGridOnFocusedCellChanged;
+            viewPropertyGrid.SelectedObject = xmlGrid;
+        }
+
+        private void XmlGridOnFocusedCellChanged(object sender, EventArgs eventArgs)
+        {
+            cellPropertyGrid.SelectedObject = xmlGrid.FocusedCell;
+            if (xmlGrid.FocusedCell != null)
+            {
+                cellPropertyGridPathTextBox.Text = string.Format("{0}: {1}", xmlGrid.FocusedCell.FullText,
+                    xmlGrid.FocusedCell.GetType().Name);
+            }
+        }
 
         private void openToolStripMenuItem_Click(object sender, EventArgs e)
         {
@@ -40,49 +54,60 @@ namespace XmlGridDemo
             dialog.Filter = "xml files (*.xml)|*.xml|All files (*.*)|*.*";
             if (dialog.ShowDialog() == DialogResult.OK)
             {
-                XmlDataDocument xmldoc = new XmlDataDocument();
-                XmlReaderSettings settings = new XmlReaderSettings();
-                settings.IgnoreWhitespace = true;
-                settings.ProhibitDtd = false;
-                XmlUrlResolver resolver = new XmlUrlResolver();
-                resolver.Credentials = CredentialCache.DefaultCredentials;
-                settings.XmlResolver = resolver;
-                XmlReader render = XmlReader.Create(dialog.FileName, settings);
+                LoadXml(dialog.FileName);
+                reloadToolStripMenuItem.Enabled = true;
+            }
+        }
+
+        private void LoadXml(string fileName)
+        {
+            _fileName = fileName;
+            xmlGrid.Clear();
+            GridCell.LastSerialNumber = 0;
+            XmlDataDocument xmldoc = new XmlDataDocument();
+            XmlReaderSettings settings = new XmlReaderSettings();
+            settings.IgnoreWhitespace = true;
+            settings.ProhibitDtd = false;
+            XmlUrlResolver resolver = new XmlUrlResolver();
+            resolver.Credentials = CredentialCache.DefaultCredentials;
+            settings.XmlResolver = resolver;
+            XmlReader render = XmlReader.Create(fileName, settings);
+            try
+            {
                 try
                 {
-                    try
-                    {
-                        xmldoc.Load(render);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show(this, ex.Message, "Parse Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        return;
-                    }
+                    xmldoc.Load(render);
                 }
-                finally
+                catch (Exception ex)
                 {
-                    render.Close();
+                    MessageBox.Show(this, ex.Message, "Parse Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
-                GridBuilder builder = new GridBuilder();
-                if (xmlGrid.ShowColumnHeader)
-                {
-                    GridCellGroup xmlgroup = new GridCellGroup();
-                    xmlgroup.Flags = GroupFlags.Overlapped | GroupFlags.Expanded;
-                    builder.ParseNodes(xmlgroup, null, xmldoc.ChildNodes);
-                    GridCellGroup root = new GridCellGroup();
-                    root.Table.SetBounds(1, 2);
-                    root.Table[0, 0] = new GridHeadLabel();
-                    root.Table[0, 0].Text = dialog.FileName;
-                    root.Table[0, 1] = xmlgroup;
-                    xmlGrid.Cell = root;
-                }
-                else
-                {
-                    GridCellGroup root = new GridCellGroup();
-                    builder.ParseNodes(root, null, xmldoc.ChildNodes);
-                    xmlGrid.Cell = root;
-                }
+            }
+            finally
+            {
+                render.Close();
+            }
+            GridBuilder builder = new GridBuilder();
+            builderPropertyGrid.SelectedObject = builder;
+            if (xmlGrid.ShowColumnHeader)
+            {
+                GridCellGroup xmlgroup = builder.CreateGridCellGroup();
+                xmlgroup.Flags = GroupFlags.Overlapped | GroupFlags.Expanded;
+                builder.ParseNodes(xmlgroup, null, xmldoc.ChildNodes);
+                builder.ParseNodes(xmlgroup, null, xmldoc.CreateNavigator());
+                GridCellGroup root = builder.CreateGridCellGroup();
+                root.Table.SetBounds(1, 2);
+                root.Table[0, 0] = new GridHeadLabel();
+                root.Table[0, 0].Text = fileName;
+                root.Table[0, 1] = xmlgroup;
+                xmlGrid.Cell = root;
+            }
+            else
+            {
+                GridCellGroup root = builder.CreateGridCellGroup();
+                builder.ParseNodes(root, null, xmldoc.ChildNodes);
+                xmlGrid.Cell = root;
             }
         }
 
@@ -101,6 +126,81 @@ namespace XmlGridDemo
         private void exitToolStripMenuItem_Click(object sender, EventArgs e)
         {
             Close();
+        }
+
+        private void reloadToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            LoadXml(_fileName);
+        }
+
+        private void invalidateToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            xmlGrid.Invalidate();
+        }
+
+        private void measureCellsToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            xmlGrid.MeasureCells();
+        }
+
+        private void expandToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void collapseToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void expandSubtreeToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void collapseSubtreeToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void expandColumnToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void collapseColumnToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void expandColumnSubtreeToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void collapseColumnSubtreeToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void expandTableRowsToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void collapseTableRowsToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void contextMenuStrip1_Opening(object sender, CancelEventArgs e)
+        {
+
+        }
+
+        private void Form1_MouseDown(object sender, MouseEventArgs e)
+        {
+
         }
     }
 }

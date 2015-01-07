@@ -14,7 +14,14 @@ namespace XmlGridDemo
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new Form1());
+            AppDomain.CurrentDomain.UnhandledException += CurrentDomainOnUnhandledException;
+            var mainForm = new Form1();
+            Application.Run(mainForm);
+        }
+
+        private static void CurrentDomainOnUnhandledException(object sender, UnhandledExceptionEventArgs unhandledExceptionEventArgs)
+        {
+            Console.WriteLine(unhandledExceptionEventArgs.ExceptionObject);
         }
     }
 }

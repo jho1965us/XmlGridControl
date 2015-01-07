@@ -15,7 +15,9 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -45,7 +47,8 @@ namespace WmHelp.XmlGrid
         public enum HitTest
         {
             Nothing, 
-            Icon, 
+            ExpandIcon,
+            Icon,
             Text, 
             Cell
         }
@@ -66,13 +69,43 @@ namespace WmHelp.XmlGrid
             }
         }
 
+        enum InjectedHeaderType
+        {
+            Row,
+            Column
+        }
+
         private static readonly ImageList _images;
         private readonly VScrollBar _vScroll;
         private readonly HScrollBar _hScroll;
+        private readonly Dictionary<Tuple<GridCell, InjectedHeaderType>, Rectangle> _injectedHeaders = new Dictionary<Tuple<GridCell, InjectedHeaderType>, Rectangle>(); 
 
         public int DefaultColumnWidth { get; set; }
         public bool AutoHeightCells { get; set; }
         public bool ShowColumnHeader { get; set; }
+
+        public bool UseSingleColumnTrees
+        {
+            get { return _useSingleColumnTrees; }
+            set
+            {
+                if (_useSingleColumnTrees != value)
+                    Invalidate();
+                _useSingleColumnTrees = value;
+            }
+        }
+
+        public bool ShowSerialNumbers
+        {
+            get { return _showSerialNumbers; }
+            set
+            {
+                if (_showSerialNumbers != value)
+                    Invalidate();
+                _showSerialNumbers = value;
+            }
+        }
+
         public String[] Footer { get; set; }
 
         private GridCellGroup _rootCell;
@@ -83,6 +116,11 @@ namespace WmHelp.XmlGrid
         private int[] _columnsWidth;
         private int[] _rowHeight;
         private bool _resizeFlag;
+        private int _indentWidth;
+        private bool _useSingleColumnTrees;
+        private bool _showSerialNumbers;
+
+        public event EventHandler FocusedCellChanged;
 
         public GridCell FocusedCell
         {
@@ -91,6 +129,18 @@ namespace WmHelp.XmlGrid
                 return _focusedCell;
             }
         }
+
+        public int IndentWidth
+        {
+            get
+            {
+                if (_indentWidth == 0)
+                    _indentWidth = _images.ImageSize.Width;
+                return _indentWidth;
+            }
+            set { _indentWidth = value; }
+        }
+
 
         #region Factory Methods
 
@@ -155,10 +205,10 @@ namespace WmHelp.XmlGrid
             form.Controls.Add(grid);
 
             var builder = new GridBuilder();
-            var xmlgroup = new GridCellGroup();
+            var xmlgroup = builder.CreateGridCellGroup();
             xmlgroup.Flags = GroupFlags.Overlapped | GroupFlags.Expanded;
             builder.ParseNodes(xmlgroup, null, xmlDoc.ChildNodes);
-            var root = new GridCellGroup();
+            var root = builder.CreateGridCellGroup();
             root.Table.SetBounds(1, 2);
             root.Table[0, 0] = new GridHeadLabel();
             root.Table[0, 0].Text = "Sample Xml";
@@ -227,10 +277,13 @@ namespace WmHelp.XmlGrid
         {
             _focusedCell = null;
             _rootCell = null;
+            _columnsWidth = new int[0];
+            _rowHeight = new int[0];
             UpdateTextMetrics();
             MeasureCells();
             UpdateScrollRange();
             Invalidate();
+            OnFocusCellChanged();
         }
 
         public GridCellGroup Cell
@@ -244,7 +297,9 @@ namespace WmHelp.XmlGrid
             {
                 _rootCell = value;
                 if (_rootCell != null)
+                {
                     _rootCell.Flags |= GroupFlags.Expanded | GroupFlags.Overlapped;
+                }
                 if (IsHandleCreated)
                 {
                     UpdateTextMetrics();
@@ -314,6 +369,11 @@ namespace WmHelp.XmlGrid
                     }
         }
 
+        /// <summary>
+        /// Recursive count number of column in a cell table
+        /// </summary>
+        /// <param name="cell"></param>
+        /// <returns></returns>
         private int CountCellColumns(GridCell cell)
         {
             if (cell.IsGroup)
@@ -323,6 +383,14 @@ namespace WmHelp.XmlGrid
                 {
                     GridCellTable table = group.Table;
                     int res = 0;
+                    if (UseSingleColumnTrees && !group.TableView)
+                    {
+                        for (int s = 0; s < table.Height; s++)
+                            if (group.Overlaped || group.ColumnsOverlaped)
+                                table[0, s].IndentLevel = cell.IndentLevel;
+                            else
+                                table[0, s].IndentLevel = cell.IndentLevel + 1;
+                    }
                     for (int k = 0; k < table.Width; k++)
                     {
                         int cols = 1;
@@ -330,7 +398,7 @@ namespace WmHelp.XmlGrid
                             cols = Math.Max(cols, CountCellColumns(table[k, s]));
                         res += cols;
                     }
-                    if (! (group.TableView || group.Overlaped))
+                    if (cell.IndentLevel == 0 && !group.TableView && !group.Overlaped)
                         res++;
                     return res;
                 }
@@ -356,6 +424,8 @@ namespace WmHelp.XmlGrid
                     }
                     if (!group.Overlaped)
                         res++;
+                    if (group.NoColumnHeader)
+                        res--;
                     return res;
                 }
             }
@@ -375,7 +445,14 @@ namespace WmHelp.XmlGrid
                 }
                 else
                 {
-                    if (cell.Overlaped)
+                    if (UseSingleColumnTrees && cell.Col == 0)
+                    {
+                        if (cell.Overlaped || cell.ColumnsOverlaped)
+                            cell.TableWidth = RangeWidth(column, count) - cell.IndentLevel * IndentWidth;
+                        else
+                            cell.TableWidth = RangeWidth(column, count) - (cell.IndentLevel + 1) * IndentWidth;
+                    }
+                    else if (cell.Overlaped || cell.ColumnsOverlaped)
                         cell.TableWidth = RangeWidth(column, count);
                     else
                     {
@@ -384,9 +461,17 @@ namespace WmHelp.XmlGrid
                     }
                     cell.TablePadding = 0;
                 }
+                //int headColWidth = int.MaxValue;
+                //if (cell.IndentLevel > 0)
+                //{
+                //    headColWidth = ColumnWidth(column) - cell.IndentLevel * IndentWidth;
+                //    if (headColWidth < 0)
+                //        headColWidth = 0;
+                //}
                 for (int k = 0; k < cell.Table.Width; k++)
                     if (k == 0 && cell.TableView)
                     {
+                        //cell.Table.ColumnsWidth[0] = Math.Min(_rowNumWidth, headColWidth);
                         cell.Table.ColumnsWidth[0] = _rowNumWidth;
                         col++;
                     }
@@ -401,7 +486,15 @@ namespace WmHelp.XmlGrid
                         }
                         else
                             cols = count - col + column;
-                        cell.Table.ColumnsWidth[k] = RangeWidth(col, cols);
+                        if (UseSingleColumnTrees && k == 0)
+                        {
+                            if (cell.Overlaped || cell.ColumnsOverlaped)
+                                cell.Table.ColumnsWidth[k] = RangeWidth(col, cols) - cell.IndentLevel * IndentWidth;
+                            else
+                                cell.Table.ColumnsWidth[k] = RangeWidth(col, cols) - (cell.IndentLevel + 1) * IndentWidth;
+                        }
+                        else
+                            cell.Table.ColumnsWidth[k] = RangeWidth(col, cols);
                         for (int s = 0; s < cell.Table.Height; s++)
                             if (cell.Table[k, s].IsGroup)
                                 SetCellWidth(col, cols, (GridCellGroup)cell.Table[k, s]); 
@@ -434,6 +527,8 @@ namespace WmHelp.XmlGrid
                     row++;
                 for (int s = 0; s < cell.Table.Height; s++)
                 {
+                    if (s == 0 && cell.NoColumnHeader)
+                        continue;
                     int rows = cell.Table.RowCount[s];
                     int height = RangeHeight(row, rows);
                     for (int k = 0; k < cell.Table.Width; k++)
@@ -467,6 +562,8 @@ namespace WmHelp.XmlGrid
                 }
                 for (int s = 0; s < cell.Table.Height; s++)
                 {
+                    if (s == 0 && cell.NoColumnHeader)
+                        continue;
                     int rows = cell.Table.RowCount[s];
                     cell.Table.RowHeight[s] = RangeHeight(row, rows);
                     for (int k = 0; k < cell.Table.Width; k++)
@@ -477,7 +574,7 @@ namespace WmHelp.XmlGrid
             }
         }
 
-        private void MeasureCells()
+        public void MeasureCells()
         {
             if (_rootCell == null)
             {
@@ -601,11 +698,27 @@ namespace WmHelp.XmlGrid
             return cell;
         }
 
+        public int FirstRow(GridCell cell)
+        {
+            if (cell.IsGroup)
+            {
+                GridCellGroup group = (GridCellGroup)cell;
+                if (group.NoColumnHeader)
+                    return 0;
+            }
+            return 1;
+        }
+
+        /// <summary>
+        /// on Up key
+        /// </summary>
+        /// <param name="cell"></param>
+        /// <returns></returns>
         public GridCell PriorCell(GridCell cell)
         {
             if (cell != null)
             {
-                if (cell.Row == 0)
+                if (cell.Row == FirstRow(cell))
                 {
                     if (cell.Parent != _rootCell)
                         if (cell.Parent.Overlaped)
@@ -626,6 +739,12 @@ namespace WmHelp.XmlGrid
 
         }
 
+        /// <summary>
+        /// on Down key
+        /// </summary>
+        /// <param name="cell"></param>
+        /// <param name="canEnter"></param>
+        /// <returns></returns>
         public GridCell NextCell(GridCell cell, bool canEnter)
         {
             if (cell != null)
@@ -682,7 +801,7 @@ namespace WmHelp.XmlGrid
             ExpandParentCell(cell);
             using (Graphics g = CreateGraphics())
                 MakeCellVisible(g, cell, false);
-            _focusedCell = cell;            
+            SetFocusedCell(cell);            
         }
 
         private GridCell GetRootCell(GridCell cell)
@@ -724,11 +843,12 @@ namespace WmHelp.XmlGrid
                         }
                         rcTop += cell.Table.RowHeight[i];
                     }
-                    int rcLeft = rc.Left;
+                    int rcLeft = rc.Left; // -indent;
                     int k = -1;
                     if (s != -1)
                         for (int i = 0; i < cell.Table.Width; i++)
                         {
+                            //indent = cell.Table[i, s].IndentLevel * IndentWidth;
                             if (rcLeft < pt.X && pt.X <= rcLeft + cell.Table.ColumnsWidth[i])
                             {
                                 k = i;
@@ -741,8 +861,11 @@ namespace WmHelp.XmlGrid
                         rc = Rectangle.FromLTRB(rcLeft, rcTop, rcLeft + cell.Table.ColumnsWidth[k],
                             rcTop + cell.Table.RowHeight[s]);
                         if (cell.Table[k, s].IsGroup)
-                            return FindCellByPoint((GridCellGroup)cell.Table[k, s], pt, rc, ref rcResult);
-                        else
+                        {
+                            var result = FindCellByPoint((GridCellGroup)cell.Table[k, s], pt, rc, ref rcResult);
+                            if (result != null)
+                                return result;
+                        }
                         {
                             rcResult = rc;
                             return cell.Table[k, s];
@@ -804,6 +927,11 @@ namespace WmHelp.XmlGrid
 
         private Rectangle FindCellRect(GridCellGroup cell, Rectangle cellRect, GridCell dest)
         {
+            return FindCellRect(cell, cellRect, dest, dest.Linage().ToArray());
+        }
+
+        private Rectangle FindCellRect(GridCellGroup cell, Rectangle cellRect, GridCell dest, GridCell[] lineage)
+        {
             if (cell.Expanded)
             {
                 int rcLeft = cellRect.Right - cell.TableWidth - cell.TablePadding;
@@ -815,12 +943,13 @@ namespace WmHelp.XmlGrid
                     {
                         int rcBottom = rcTop + cell.Table.RowHeight[s];
                         Rectangle rc = Rectangle.FromLTRB(rcLeft, rcTop, rcRight, rcBottom);
-                        if (cell.Table[k, s] == dest)
+                        var candidate = cell.Table[k, s];
+                        if (candidate == dest)
                             return rc;
-                        else
-                            if (cell.Table[k, s].IsGroup)
+                        else if (lineage.Contains(candidate))
+                            if (candidate.IsGroup)
                             {
-                                rc = FindCellRect((GridCellGroup)cell.Table[k, s], rc, dest);
+                                rc = FindCellRect((GridCellGroup)candidate, rc, dest, lineage);
                                 if (!rc.IsEmpty)
                                     return rc;
                             }
@@ -832,6 +961,10 @@ namespace WmHelp.XmlGrid
             return Rectangle.Empty;
         }
 
+        /// <summary>
+        /// ClientRectangle but ColumnHeader and ScrollBars (if visible)
+        /// </summary>
+        /// <returns></returns>
         public Rectangle GetClientRect()
         {
             Rectangle rcClient = ClientRectangle;
@@ -864,10 +997,17 @@ namespace WmHelp.XmlGrid
             cell = FindCellByPoint(p, ref cellRect);
             if (cell != null)
             {
-                Rectangle rc;
-                if (cell.ImageIndex != -1)
+                Rectangle rc = new Rectangle(cellRect.Left + 1, cellRect.Top + 2, 0, 0);
+                if (cell.ExpandImageIndex != -1)
                 {
                     rc = new Rectangle(cellRect.Left + 2, cellRect.Top + 2,
+                        _images.ImageSize.Width, _images.ImageSize.Height);
+                    if (rc.Contains(p))
+                        return HitTest.ExpandIcon;
+                }
+                if (cell.ImageIndex != -1)
+                {
+                    rc = new Rectangle(rc.Left + rc.Width + 1, cellRect.Top + 2,
                         _images.ImageSize.Width, _images.ImageSize.Height);
                     if (rc.Contains(p))
                         return HitTest.Icon;
@@ -1118,9 +1258,17 @@ namespace WmHelp.XmlGrid
                 else
                     _focusedCell = target;
                 Invalidate();
+                OnFocusCellChanged();
             }            
         }
-        
+
+        protected void OnFocusCellChanged()
+        {
+            var onFocusedCellChanged = FocusedCellChanged;
+            if (onFocusedCellChanged != null)
+                onFocusedCellChanged(this, new EventArgs());
+        }
+
         #endregion
 
         #region Scroll
@@ -1267,7 +1415,7 @@ namespace WmHelp.XmlGrid
                 GridCell cell;
                 HitTest hitTest = GetHitTest(p, out cell);
                 if (e.Button == MouseButtons.Left &&
-                    hitTest == HitTest.Icon && cell.IsGroup)
+                    hitTest == HitTest.ExpandIcon)
                 {
                     GridCellGroup group = (GridCellGroup)cell;
                     if (!group.Expanded)
@@ -1565,7 +1713,8 @@ namespace WmHelp.XmlGrid
             int pixelWidth, int pixelHeight, bool isSelected)
         {
             Rectangle cellRect = Rectangle.FromLTRB(x + 1, y + 1,
-                x + pixelWidth, y + pixelHeight);            
+                x + pixelWidth, y + pixelHeight);
+            var fullCellRect = cellRect;
             Brush brush;
             if (cell is GridHeadLabel)
             {
@@ -1608,15 +1757,9 @@ namespace WmHelp.XmlGrid
             g.FillRectangle(brush, cellRect);
             if (cell == _focusedCell)
                 ControlPaint.DrawFocusRectangle(g, cellRect);
-            if (cell.ImageIndex != -1)
-            {                                    
-                if (cell.ImageIndex <= 1)
-                    g.DrawImage(_images.Images[cell.ImageIndex], x + 5, y + 3);
-                else
-                    g.DrawImage(_images.Images[cell.ImageIndex], x + 2, y + 2);
-                cellRect.X += _images.ImageSize.Width +1;
-                cellRect.Width -= _images.ImageSize.Width + 1;
-            }
+
+            DrawImage(g, x, y, ref cellRect, cell.ExpandImageIndex);
+            DrawImage(g, cellRect.X - 1, y, ref cellRect, cell.ImageIndex);
             cellRect.Offset(0, -1);
             cellRect.Inflate(-3, -1);
             StringFormat sf = cell.GetStringFormat();            
@@ -1630,6 +1773,37 @@ namespace WmHelp.XmlGrid
             else
                 if (cell.Text != null)
                     cell.DrawCellText(this, g, Font, textBrush, sf, _drawInfo, cellRect);
+            if (ShowSerialNumbers)
+            {
+                Font font = new Font(Font, FontStyle.Bold);
+                sf.Alignment = StringAlignment.Near;
+                g.DrawString(cell.SerialNumber.ToString(), font, Brushes.Red, fullCellRect, sf);
+            }
+        }
+
+        private static void DrawImage(Graphics g, int x, int y, ref Rectangle cellRect, int imageIndex)
+        {
+            if (imageIndex != -1)
+            {
+                if (imageIndex <= 1)
+                    //g.DrawImage(_images.Images[imageIndex], x + 5, y + 3);
+                    g.DrawImage(_images.Images[imageIndex], x + 4, y + 3);
+                else
+                    //g.DrawImage(_images.Images[imageIndex], x + 2, y + 2);
+                    g.DrawImage(_images.Images[imageIndex], x + 2, y + 3);
+                cellRect.X += _images.ImageSize.Width + 1;
+                cellRect.Width -= _images.ImageSize.Width + 1;
+            }
+        }
+
+        enum InjectHeaderRow
+        {
+            No,
+            Cells,
+            GapTop,
+            Gap1,
+            Gap2,
+            Done
         }
 
         private void DrawGridTable(Graphics g, RectangleF clipRect, int X, int Y, GridCellTable table,
@@ -1645,17 +1819,75 @@ namespace WmHelp.XmlGrid
             }
             int top = Y;
             int right = X + pixelWidth;
-            for (int i = 0; i < table.Height - 1; i++)
+            //for (int i = 0; i < table.Height - 1; i++)
+            //{
+            //    top += table.RowHeight[i];
+            //    g.DrawLine(pen, X, top, right, top);
+            //}
+            //top = Y;
+            // todo slow and broken for multi line rows use same strategy as ShowColumnHeader instead
+            //var injectHeaderRow = table.Parent.TableView && !table.Parent.NoColumnHeader ? InjectHeaderRow.Cells : InjectHeaderRow.No;
+            var injectHeaderRow = InjectHeaderRow.No;
+            for (int s_ = 0; s_ < table.Height; s_++)
             {
-                top += table.RowHeight[i];
-                g.DrawLine(pen, X, top, right, top);
-            }
-            top = Y;
-            for (int s = 0; s < table.Height; s++)
-            {
+                if (s_ == 0 && table.Parent.NoColumnHeader)
+                    continue;
                 left = X;
-                int H = table.RowHeight[s];
+                int H = table.RowHeight[s_];
                 if (clipRect.Top < top + H && top <= clipRect.Bottom)
+                {
+                    var s = s_;
+                    if (s_ == 0 || injectHeaderRow == InjectHeaderRow.Cells)
+                    {
+                        var windowRect = GetWindowRect();
+                        var key = Tuple.Create(table[0, 0], InjectedHeaderType.Row);
+                        Rectangle oldLocation;
+                        if (_injectedHeaders.TryGetValue(key, out oldLocation))
+                        {
+                            var remove = true; // !clipRect.Contains(oldLocation);
+                            if (remove)
+                            {
+                                oldLocation.X -= windowRect.X;
+                                oldLocation.Y -= windowRect.Y;
+                                Invalidate(oldLocation);
+                            }
+                            _injectedHeaders.Remove(key);
+                        }
+                        if (s_ == 0)
+                        {
+                            injectHeaderRow = InjectHeaderRow.No;
+                        }
+                        else if (injectHeaderRow == InjectHeaderRow.Cells)
+                        {
+                            var rcHeaderRow = FindCellRect(table[0, 0]);
+                            if (windowRect.Y > rcHeaderRow.Top)
+                            {
+                                rcHeaderRow.Y = windowRect.Y; // todo relative if nested rows
+                                rcHeaderRow.Width = table.Parent.TableWidth;
+                                rcHeaderRow.Height += 2;
+                                //rcHeaderRow.Intersect(Rectangle.Round(clipRect));
+                                _injectedHeaders.Add(key, rcHeaderRow);
+                                if (windowRect.Y < clipRect.Y)
+                                {
+                                    rcHeaderRow.Y -= windowRect.Y;
+                                    rcHeaderRow.X -= windowRect.X;
+                                    //rcHeaderRow.Height = ;
+                                    Invalidate(rcHeaderRow);
+                                    injectHeaderRow = InjectHeaderRow.No; // todo skip
+                                }
+                                else
+                                {
+                                    s = 0;
+                                    injectHeaderRow = InjectHeaderRow.Gap1;
+                                }
+                                // todo keep track below inject y
+                            }
+                            else
+                            {
+                                injectHeaderRow = InjectHeaderRow.No;
+                            }
+                        }
+                    }                    // todo not if skip
                     for (int k = 0; k < table.Width; k++)
                     {
                         int W = table.ColumnsWidth[k];
@@ -1669,16 +1901,40 @@ namespace WmHelp.XmlGrid
                             {
                                 GridCellGroup groupCell = (GridCellGroup)cell;
                                 if (groupCell.Overlaped)
-                                    DrawGridTable(g, clipRect, left, top, groupCell.Table, W, H, cellSelected);
+                                {
+                                    var L = W - groupCell.TableWidth;
+                                    if (L > 0)
+                                        g.DrawLine(pen, left + L, top, left + L, top + H);
+                                    DrawGridTable(g, clipRect, left + L, top, groupCell.Table, W - L, H, cellSelected);
+                                }
                                 else
                                     DrawGroupCell(g, clipRect, left, top, groupCell, W, H, cellSelected);
                             }
                             else
+                            {
+                                //if (cell.IndentLevel > 0 && !cell.Parent.Overlaped && !cell.Parent.ColumnsOverlaped)
+                                //    W -= IndentWidth;
                                 DrawCell(g, left, top, cell, W, H, cellSelected);
+                            }
                         }
                         left += W;
                     }
+                }
+                if (injectHeaderRow == InjectHeaderRow.Gap2)
+                {
+                    g.DrawLine(pen, X, top + 1, right, top + 1);
+                    injectHeaderRow = InjectHeaderRow.Done;
+                }
                 top += H;
+                if (injectHeaderRow == InjectHeaderRow.Gap1)
+                {
+                    g.DrawLine(pen, X, top - 1, right, top - 1);
+                    injectHeaderRow = InjectHeaderRow.Gap2;
+                }
+                else // if (injectHeaderRow == InjectHeaderRow.Complex || injectHeaderRow == InjectHeaderRow.Done)
+                {
+                    g.DrawLine(pen, X, top, right, top);
+                }
             }
             if (top < Y + pixelHeight)
                 g.DrawLine(pen, X, top, X + pixelWidth, top);
@@ -1697,12 +1953,14 @@ namespace WmHelp.XmlGrid
                 g.DrawLine(pen, X + left, Y + top, X + pixelWidth, Y + top);
                 if (cell == _focusedCell)
                 {
-                    Rectangle rc = Rectangle.FromLTRB(X + left - 1, Y + top - 1, 
+                    // put dotted lines to the left/top side of inner table
+                    Rectangle rc = Rectangle.FromLTRB(X + left - 1, Y + top - 1,
                         X + pixelWidth, Y + pixelHeight);
                     ControlPaint.DrawFocusRectangle(g, rc);
                     Pen framePen = new Pen(Color.FromArgb(0xA6, 0xCA, 0xF0));
-                    g.DrawLine(framePen, X + pixelWidth - 1, Y + top, 
-                        X + pixelWidth - 1, Y + pixelHeight);
+                    // overwrite dotted lines from focus rectangle on the bottom/right side of tablePadding
+                    g.DrawLine(framePen, X + pixelWidth - 1, Y + top,
+                        X + pixelWidth - 1, Y + pixelHeight - 1);
                     g.DrawLine(framePen, X + pixelWidth - cell.TablePadding - 1, Y + pixelHeight - 1,
                         X + pixelWidth, Y + pixelHeight - 1);
                 }
@@ -1711,6 +1969,16 @@ namespace WmHelp.XmlGrid
                         X + pixelWidth - cell.TablePadding, Y + pixelHeight);
                 DrawGridTable(g, clipRect, X + left, Y + top, cell.Table, cell.TableWidth, cell.TableHeight,
                     isSelected || cell == _focusedCell);
+
+                //if (cell.TableView)
+                //{
+                //    var rc = new Rectangle(X, Y, pixelWidth, pixelHeight);
+                //    rc = FindCellRect(cell, rc, cell.Table[0, 0]);
+                //    rc.Width = cell.TableWidth;
+                //    var brush = new HatchBrush(HatchStyle.BackwardDiagonal, Color.Red, Color.Transparent);
+                //    g.FillRectangle(brush, rc);
+                    
+                //}
             }
         }
 
@@ -1722,15 +1990,28 @@ namespace WmHelp.XmlGrid
             g.TranslateTransform(-_drawInfo.cxChar * _drawInfo.xPos,
                 -_drawInfo.cyChar * _drawInfo.yPos);
             RectangleF clipRect = g.ClipBounds;
+            Rectangle window = GetWindowRect();
             if (ShowColumnHeader)
             {
-                Rectangle window = GetWindowRect();
                 RectangleF rc = RectangleF.FromLTRB(window.Left, window.Top, 
                     window.Right, window.Bottom);
                 clipRect.Intersect(rc);
             }            
             if (_rootCell != null)
-            {                
+            {
+                var injectedHeaders = _injectedHeaders.ToArray();
+                _injectedHeaders.Clear();
+                foreach (var injectedHeader in injectedHeaders)
+                {
+                    var value = injectedHeader.Value;
+                    value.Intersect(window);
+                    var keep1 = !value.IsEmpty;
+                    var keep2 = true; //!clipRect.Contains(value);
+                    if (keep1 && keep2)
+                    {
+                        _injectedHeaders.Add(injectedHeader.Key, value);
+                    }
+                }
                 DrawGridTable(g, clipRect, 0, 0, 
                     _rootCell.Table, _drawInfo.iMaxWidth, _drawInfo.iHeight, false);
                 if (ShowColumnHeader)
